@@ -1,8 +1,8 @@
-<img src="strand-advisor.png" alt="drawing" width="200"/>
+<img src="strand-generator.png" alt="drawing" width="200"/>
 
-# strand-advisor v1.0 — In silico Strand-seq ground-truth generator (VISOR wrapper)
+# strand-generator v1.0 — In silico Strand-seq ground-truth generator (VISOR wrapper)
 
-`strand-advisor` is a lightweight command-line wrapper around **VISOR** that generates **in silico Strand-seq BAMs** with:
+`strand-generator` is a lightweight command-line wrapper around **VISOR** that generates **in silico Strand-seq BAMs** with:
 
 - **Haplotype-specific SV truth** (via `VISOR HACk`)
 - **Strand-seq simulation** (via `VISOR SHORtS --strandseq`)
@@ -27,11 +27,11 @@ You typically provide:
 3) **# cells** to simulate (+ optional # reference cells)
 4) Optional haplotagging parameters
 
-> Important: `strand-advisor` assumes your **regions BED coordinates are in reference coordinates** (GRCh38 contigs like `chr1`, `chr2`, …).
+> Important: `strand-generator` assumes your **regions BED coordinates are in reference coordinates** (GRCh38 contigs like `chr1`, `chr2`, …).
 
 ---
 
-### 1.2 What happens inside `strand-advisor`
+### 1.2 What happens inside `strand-generator`
 
 #### Step A — Prepare a run folder
 Given `--out OUTDIR`, the tool creates:
@@ -51,7 +51,7 @@ This makes each run reproducible and portable: the exact inputs are copied into 
 ---
 
 #### Step B — Validate SVs lie within the region(s)
-Before simulation, `strand-advisor` checks that each SV interval in your SV beds is fully contained in one of the regions specified in `--regions`.
+Before simulation, `strand-generator` checks that each SV interval in your SV beds is fully contained in one of the regions specified in `--regions`.
 
 If an SV falls outside your simulation region, the run fails early with a clear error.
 
@@ -110,7 +110,7 @@ Then the wrapper selects the appropriate per-haplotype (W/C) BAMs and merges the
 #### Step F — Sparse haplotagging (HP tags)
 Real Strand-seq data often has **sparse haplotag information** (only a fraction of reads carry HP tags).
 
-`strand-advisor` models this in a **site-driven** way:
+`strand-generator` models this in a **site-driven** way:
 
 1) Takes haplotype-informative SNP sites from two BED files (h1 and h2).
 2) Downsamples sites using `--hp-density` (0–1).
@@ -163,16 +163,16 @@ You must provide a reference FASTA and index:
 
 ### 3.1 Clone
 ```bash
-git clone https://github.com/<YOUR_ORG_OR_USER>/strand-advisor.git
-cd strand-advisor
+git clone https://github.com/<YOUR_ORG_OR_USER>/strand-generator.git
+cd strand-generator
 ```
 
-### 3.2 Put `strand-advisor` on your PATH
+### 3.2 Put `strand-generator` on your PATH
 Add to `~/.bashrc`:
 
 ```bash
-# strand-advisor CLI
-STRAND_ADVISOR_HOME=/data/cephfs-1/home/users/<YOU>/work/strand-advisor
+# strand-generator CLI
+STRAND_ADVISOR_HOME=/data/cephfs-1/home/users/<YOU>/work/strand-generator
 export PATH="$STRAND_ADVISOR_HOME/bin:$PATH"
 ```
 
@@ -185,8 +185,8 @@ source ~/.bashrc
 Verify:
 
 ```bash
-which strand-advisor
-strand-advisor --help
+which strand-generator
+strand-generator --help
 ```
 
 ---
@@ -196,12 +196,12 @@ strand-advisor --help
 ### 4.1 Repo location (stable)
 Example:
 - Repo lives here (long-term):  
-  `/data/cephfs-1/home/users/pweidne_m/work/strand-advisor`
+  `/data/cephfs-1/home/users/pweidne_m/work/strand-generator`
 
 ### 4.2 Shared assets (large, shared)
 Example:
 - Shared references & SNP sites live here:  
-  `/data/cephfs-1/work/groups/sanders/strand-advisor-assets`
+  `/data/cephfs-1/work/groups/sanders/strand-generator-assets`
 
 ### 4.3 Run outputs (scratch)
 Example:
@@ -209,12 +209,12 @@ Example:
   `/data/cephfs-1/scratch/groups/sanders/kiwi_tmp/advisor-beta`
 
 ### 4.4 `config/defaults.env`
-`strand-advisor` sources `config/defaults.env` automatically.
+`strand-generator` sources `config/defaults.env` automatically.
 
 Keep it portable and small. A typical pattern is to **set `REF_FASTA` in your shell**:
 
 ```bash
-export REF_FASTA=/data/cephfs-1/work/groups/sanders/strand-advisor-assets/refs/GRCh38_full_analysis_set_plus_decoy_hla.fa
+export REF_FASTA=/data/cephfs-1/work/groups/sanders/strand-generator-assets/refs/GRCh38_full_analysis_set_plus_decoy_hla.fa
 ```
 
 Then runs can be executed from anywhere.
@@ -301,7 +301,7 @@ From anywhere, with `REF_FASTA` set:
 ```bash
 OUT=/data/cephfs-1/scratch/groups/sanders/kiwi_tmp/advisor-beta
 
-strand-advisor \
+strand-generator \
   --cells 4 \
   --refcells 1 \
   --regions /data/cephfs-1/scratch/groups/sanders/kiwi_tmp/input-advisor/regions.chr1_50Mb.bed \
@@ -365,15 +365,15 @@ If you notice “empty tails” after a duplication, this is usually due to refe
 Tune empirically.
 
 ### 7.3 Reference cells
-VISOR generates `reference_cell*` when `--refcells` is set; `strand-advisor` post-processes both `sample_cell*` and `reference_cell*` into final BAMs.
+VISOR generates `reference_cell*` when `--refcells` is set; `strand-generator` post-processes both `sample_cell*` and `reference_cell*` into final BAMs.
 
 ---
 
 ## 8) Versioning
-This README corresponds to **strand-advisor v1.0**.
+This README corresponds to **strand-generator v1.0**.
 
 If you plan to publish a release, consider:
-- tagging: `git tag -a v1.0 -m "strand-advisor v1.0"`
+- tagging: `git tag -a v1.0 -m "strand-generator v1.0"`
 - pushing tags: `git push --tags`
 
 ---
