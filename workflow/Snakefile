@@ -1,0 +1,136 @@
+import os
+import shlex
+
+
+ROOT = os.path.abspath(os.getcwd())
+
+
+def cfg(section, key, default=None):
+    return config.get(section, {}).get(key, default)
+
+
+def q(value):
+    return shlex.quote(str(value))
+
+
+def require_path(section, key):
+    value = cfg(section, key, "")
+    if not value:
+        raise ValueError(f"config[{section!r}][{key!r}] is required")
+    return value
+
+
+RUN_OUT = require_path("run", "out_dir")
+RUN_ENV = os.path.join(RUN_OUT, "config", "run.env")
+SNV_SUMMARY = os.path.join(RUN_OUT, "truth", "snv_summary.tsv")
+RUN_DONE = os.path.join(RUN_OUT, "config", "strand_creator.done")
+LOG_FILE = os.path.join(RUN_OUT, "logs", "strand_creator.log")
+LOG_DIR = os.path.dirname(LOG_FILE)
+STRAND_CREATOR = os.path.join(ROOT, "bin", "strand-creator")
+
+
+def strand_creator_inputs(wildcards):
+    paths = [
+        require_path("reference", "fasta"),
+        require_path("inputs", "regions"),
+        require_path("inputs", "snp_h1"),
+        require_path("inputs", "snp_h2"),
+    ]
+    hack_dir = cfg("inputs", "hack_dir", "")
+    if hack_dir:
+        paths.extend([
+            os.path.join(hack_dir, "h1.fa"),
+            os.path.join(hack_dir, "h2.fa"),
+        ])
+    else:
+        paths.extend([
+            require_path("inputs", "sv_h1"),
+            require_path("inputs", "sv_h2"),
+        ])
+    sce_bed = cfg("inputs", "sce_bed", "")
+    if sce_bed:
+        paths.append(sce_bed)
+    return paths
+
+
+def strand_creator_command():
+    args = [
+        q(STRAND_CREATOR),
+        "--cells", q(cfg("simulation", "cells", 1)),
+        "--refcells", q(cfg("simulation", "refcells", 0)),
+        "--threads", q(cfg("simulation", "threads", 16)),
+        "--coverage", q(cfg("simulation", "coverage", 0.04)),
+        "--noise", q(cfg("simulation", "noise", 5.0)),
+        "--hp-density", q(cfg("simulation", "hp_density", 1.0)),
+        "--min-snps-for-phasing", q(cfg("simulation", "min_snps_for_phasing", 5)),
+        "--regions", q(require_path("inputs", "regions")),
+        "--snp-h1", q(require_path("inputs", "snp_h1")),
+        "--snp-h2", q(require_path("inputs", "snp_h2")),
+        "--out", q(RUN_OUT),
+    ]
+
+    seed = cfg("simulation", "seed", "")
+    if seed != "":
+        args.extend(["--seed", q(seed)])
+
+    hack_dir = cfg("inputs", "hack_dir", "")
+    if hack_dir:
+        args.extend(["--hack", q(hack_dir)])
+    else:
+        args.extend([
+            "--sv-h1", q(require_path("inputs", "sv_h1")),
+            "--sv-h2", q(require_path("inputs", "sv_h2")),
+        ])
+
+    sce_bed = cfg("inputs", "sce_bed", "")
+    if sce_bed:
+        args.extend(["--sce", q(sce_bed)])
+
+    if cfg("run", "validate_only", False):
+        args.append("--validate-only")
+
+    return " ".join(args)
+
+
+rule all:
+    input:
+        RUN_DONE,
+        RUN_ENV,
+        SNV_SUMMARY
+
+
+rule strand_creator_run:
+    input:
+        strand_creator_inputs
+    output:
+        run_env=RUN_ENV,
+        snv_summary=SNV_SUMMARY,
+        done=touch(RUN_DONE)
+    log:
+        LOG_FILE
+    threads:
+        int(cfg("simulation", "threads", 16))
+    resources:
+        mem_mb=int(cfg("resources", "mem_mb", 32000)),
+        time=cfg("resources", "time", "04:00:00"),
+        partition=cfg("resources", "partition", "short"),
+        qos=cfg("resources", "qos", "normal")
+    params:
+        ref_fasta=q(require_path("reference", "fasta")),
+        assets_dir=q(cfg("reference", "assets_dir", "")),
+        log_dir=q(LOG_DIR),
+        log_file=q(LOG_FILE),
+        bam_dir=q(os.path.join(RUN_OUT, "bam")),
+        validate_only="true" if cfg("run", "validate_only", False) else "false",
+        command=lambda wc: strand_creator_command()
+    shell:
+        r"""
+        mkdir -p {params.log_dir}
+        export REF_FASTA={params.ref_fasta}
+        export ASSETS_DIR={params.assets_dir}
+        {params.command} > {params.log_file} 2>&1
+        if [ {params.validate_only} = false ]; then
+          bam_count=$(find {params.bam_dir} -name '*.bam.htg' | wc -l)
+          test "$bam_count" -gt 0
+        fi
+        """

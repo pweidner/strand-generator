@@ -1,0 +1,38 @@
+# strand-creator cluster configuration
+#
+# Edit these paths on the cluster before running:
+#   snakemake --profile workflow/profiles --configfile config/config.yaml
+
+run:
+  name: smoke-001
+  out_dir: "/data/cephfs-1/scratch/groups/sanders/kiwi_tmp/strand-creator-smoke-001"
+  validate_only: false
+
+reference:
+  assets_dir: "/data/cephfs-1/work/groups/sanders/strand-creator-assets"
+  fasta: "/data/cephfs-1/work/groups/sanders/strand-creator-assets/refs/GRCh38_full_analysis_set_plus_decoy_hla.fa"
+
+inputs:
+  regions: "/data/cephfs-1/scratch/groups/sanders/kiwi_tmp/strand-creator-inputs/regions.bed"
+  sv_h1: "/data/cephfs-1/scratch/groups/sanders/kiwi_tmp/strand-creator-inputs/sv.h1.bed"
+  sv_h2: "/data/cephfs-1/scratch/groups/sanders/kiwi_tmp/strand-creator-inputs/sv.h2.bed"
+  snp_h1: "/data/cephfs-1/work/groups/sanders/strand-creator-assets/snp_sites/HG00732.snps.h1.bed"
+  snp_h2: "/data/cephfs-1/work/groups/sanders/strand-creator-assets/snp_sites/HG00732.snps.h2.bed"
+  hack_dir: ""
+  sce_bed: ""
+
+simulation:
+  cells: 4
+  refcells: 1
+  coverage: 0.04
+  noise: 5.0
+  hp_density: 0.2
+  min_snps_for_phasing: 5
+  seed: 42
+  threads: 16
+
+resources:
+  mem_mb: 32000
+  time: "04:00:00"
+  partition: "short"
+  qos: "normal"

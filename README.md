@@ -197,6 +197,16 @@ which strand-creator
 strand-creator --help
 ```
 
+### 3.3 Snakemake cluster entry point
+`strand-creator` also ships a small Snakemake wrapper for cluster runs. Edit `config/config.yaml`, then run from the repository root:
+
+```bash
+snakemake --profile workflow/profiles --configfile config/config.yaml -n
+snakemake --profile workflow/profiles --configfile config/config.yaml
+```
+
+The Snakemake layer intentionally calls `bin/strand-creator` rather than duplicating simulator logic. This keeps the first smoke target simple now and gives us a clean place to add future per-cell profile-table runs from `bamqc-pipeline` outputs.
+
 ---
 
 ## 4) Configuration model (recommended for HPC)
@@ -355,7 +365,25 @@ You should see:
 
 ---
 
-### 6.2 Validate inputs without running VISOR
+### 6.2 Snakemake smoke run
+The recommended cluster test path is Snakemake. Set `run.validate_only: true` in `config/config.yaml` for a fast validation run, or `false` to make BAMs. Then run:
+
+```bash
+snakemake --profile workflow/profiles --configfile config/config.yaml -n
+snakemake --profile workflow/profiles --configfile config/config.yaml
+```
+
+The first target creates:
+
+- `config/run.env`
+- `truth/snv_summary.tsv`
+- `config/strand_creator.done`
+
+When `run.validate_only: false`, the same job also writes final BAMs under `bam/`.
+
+---
+
+### 6.3 Validate inputs without running VISOR
 Use `--validate-only` to check input paths, BED shapes, SV containment, SNV truth
 preparation, refcell percentage conversion, and run metadata without starting a
 simulation:
@@ -376,7 +404,7 @@ strand-creator \
 
 ---
 
-### 6.3 Quick sanity checks
+### 6.4 Quick sanity checks
 
 #### Check inheritance ledger
 ```bash
