@@ -24,13 +24,21 @@ RUN_OUT = require_path("run", "out_dir")
 RUN_ENV = os.path.join(RUN_OUT, "config", "run.env")
 SNV_SUMMARY = os.path.join(RUN_OUT, "truth", "snv_summary.tsv")
 RUN_DONE = os.path.join(RUN_OUT, "config", "strand_creator.done")
+BAM_MANIFEST = os.path.join(RUN_OUT, "config", "bam_manifest.tsv")
 LOG_FILE = os.path.join(RUN_OUT, "logs", "strand_creator.log")
 LOG_DIR = os.path.dirname(LOG_FILE)
 STRAND_CREATOR = os.path.join(ROOT, "bin", "strand-creator")
+WRAPPER_INPUTS = [
+    STRAND_CREATOR,
+    os.path.join(ROOT, "lib", "prepare_snv_truth.py"),
+    os.path.join(ROOT, "lib", "tag_hp_sparse.py"),
+    os.path.join(ROOT, "lib", "common.sh"),
+]
+CONFIG_INPUTS = [str(path) for path in workflow.configfiles]
 
 
 def strand_creator_inputs(wildcards):
-    paths = [
+    paths = CONFIG_INPUTS + WRAPPER_INPUTS + [
         require_path("reference", "fasta"),
         require_path("inputs", "regions"),
         require_path("inputs", "snp_h1"),
@@ -96,7 +104,8 @@ rule all:
     input:
         RUN_DONE,
         RUN_ENV,
-        SNV_SUMMARY
+        SNV_SUMMARY,
+        BAM_MANIFEST
 
 
 rule strand_creator_run:
@@ -105,6 +114,7 @@ rule strand_creator_run:
     output:
         run_env=RUN_ENV,
         snv_summary=SNV_SUMMARY,
+        bam_manifest=BAM_MANIFEST,
         done=touch(RUN_DONE)
     log:
         LOG_FILE
@@ -121,6 +131,7 @@ rule strand_creator_run:
         log_dir=q(LOG_DIR),
         log_file=q(LOG_FILE),
         bam_dir=q(os.path.join(RUN_OUT, "bam")),
+        bam_manifest=q(BAM_MANIFEST),
         validate_only="true" if cfg("run", "validate_only", False) else "false",
         command=lambda wc: strand_creator_command()
     shell:
@@ -129,8 +140,12 @@ rule strand_creator_run:
         export REF_FASTA={params.ref_fasta}
         export ASSETS_DIR={params.assets_dir}
         {params.command} > {params.log_file} 2>&1
+        mkdir -p "$(dirname {params.bam_manifest})"
         if [ {params.validate_only} = false ]; then
-          bam_count=$(find {params.bam_dir} -name '*.bam.htg' | wc -l)
+          find {params.bam_dir} -name '*.bam.htg' | sort > {params.bam_manifest}
+          bam_count=$(wc -l < {params.bam_manifest})
           test "$bam_count" -gt 0
+        else
+          : > {params.bam_manifest}
         fi
         """
