@@ -1,0 +1,452 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# Resolve tool root and load helpers
+###############################################################################
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/lib/common.sh"
+# Load defaults (cluster-level config)
+DEFAULTS_FILE="$ROOT/config/defaults.env"
+if [ -f "$DEFAULTS_FILE" ]; then
+  # shellcheck disable=SC1090
+  source "$DEFAULTS_FILE"
+fi
+
+###############################################################################
+# Usage
+###############################################################################
+usage() {
+cat <<EOF
+strand-creator
+
+Generate Strand-seq ground truth datasets with SVs, inheritance states,
+reference control cells, real haplotype SNVs, and sparse haplotags.
+
+Required:
+  --cells N
+  --regions REGIONS.bed
+  --out OUTDIR
+
+One of:
+  --hack HACk_DIR
+  --sv-h1 SV_H1.bed --sv-h2 SV_H2.bed
+
+Optional:
+  --threads N (default: 16)
+  --coverage FLOAT       (default from config/defaults.env)
+  --noise FLOAT          (default from config/defaults.env)
+  --refcells N
+  --hp-density FLOAT      (0–1, default 1.0)
+  --snp-h1 BED            VISOR SNP BED6 for haplotype 1
+  --snp-h2 BED            VISOR SNP BED6 for haplotype 2
+  --snp-sample NAME      (default: HG00732)
+  --min-snps-for-phasing N (default: 5)
+  --sce BED
+  --seed N               Reproducible seed for HP-site thinning and inheritance
+  --validate-only        Validate inputs and write run metadata, then stop
+
+Environment:
+  REF_FASTA   (required)
+
+EOF
+}
+
+###############################################################################
+# Defaults
+###############################################################################
+CELLS=""
+REFCELLS=0
+OUT=""
+REGIONS=""
+SV_H1=""
+SV_H2=""
+HACK_DIR=""
+HP_DENSITY=1.0
+SNP_SAMPLE="HG00732"
+SNP_H1=""
+SNP_H2=""
+MIN_SNPS_FOR_PHASING="${MIN_SNPS_FOR_PHASING:-5}"
+SCE_BED=""
+SEED=""
+VALIDATE_ONLY=0
+
+###############################################################################
+# Parse arguments
+###############################################################################
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cells) CELLS="$2"; shift 2;;
+    --threads) THREADS="$2"; shift 2;;
+    --coverage) COVERAGE="$2"; shift 2;;
+    --noise) NOISE="$2"; shift 2;;
+    --refcells) REFCELLS="$2"; shift 2;;
+    --regions) REGIONS="$2"; shift 2;;
+    --sv-h1) SV_H1="$2"; shift 2;;
+    --sv-h2) SV_H2="$2"; shift 2;;
+    --hack) HACK_DIR="$2"; shift 2;;
+    --sce) SCE_BED="$2"; shift 2;;
+    --hp-density) HP_DENSITY="$2"; shift 2;;
+    --snp-h1) SNP_H1="$2"; shift 2;;
+    --snp-h2) SNP_H2="$2"; shift 2;;
+    --snp-sample) SNP_SAMPLE="$2"; shift 2;;
+    --min-snps-for-phasing) MIN_SNPS_FOR_PHASING="$2"; shift 2;;
+    --seed) SEED="$2"; shift 2;;
+    --validate-only) VALIDATE_ONLY=1; shift;;
+    --out) OUT="$2"; shift 2;;
+    -h|--help) usage; exit 0;;
+    *) die "Unknown argument: $1";;
+  esac
+done
+
+###############################################################################
+# Validate basic inputs
+###############################################################################
+need awk
+need sort
+need python3
+if [ "$VALIDATE_ONLY" -eq 0 ]; then
+  need VISOR
+  need samtools
+fi
+
+[ -n "$CELLS" ] || die "--cells required"
+[ -n "$OUT" ] || die "--out required"
+[ -n "$REGIONS" ] || die "--regions required"
+[ -f "$REGIONS" ] || die "Regions BED not found"
+
+[ -n "${REF_FASTA:-}" ] || die "REF_FASTA environment variable not set"
+[ -f "$REF_FASTA" ] || die "REF_FASTA not found"
+if [ ! -f "$REF_FASTA.fai" ]; then
+  if [ "$VALIDATE_ONLY" -eq 1 ]; then
+    echo "[WARN] REF_FASTA index not found; skipping samtools faidx in --validate-only mode"
+  else
+    samtools faidx "$REF_FASTA"
+  fi
+fi
+echo "[INFO] Using REF_FASTA: $REF_FASTA"
+echo "[INFO] Using ASSETS_DIR: ${ASSETS_DIR:-<unset>}"
+
+awk -v p="$HP_DENSITY" 'BEGIN{ if(p<0||p>1) exit 1 }' \
+  || die "--hp-density must be between 0 and 1"
+awk -v n="$CELLS" 'BEGIN{ if(n !~ /^[0-9]+$/ || n<1) exit 1 }' \
+  || die "--cells must be an integer >= 1"
+awk -v n="$THREADS" 'BEGIN{ if(n !~ /^[0-9]+$/ || n<1) exit 1 }' \
+  || die "--threads must be an integer >= 1"
+awk -v x="$COVERAGE" 'BEGIN{ if(x !~ /^[0-9.]+$/ || x<=0) exit 1 }' \
+  || die "--coverage must be > 0"
+awk -v x="$NOISE" 'BEGIN{ if(x !~ /^[0-9.]+$/ || x<0) exit 1 }' \
+  || die "--noise must be >= 0"
+awk -v n="$MIN_SNPS_FOR_PHASING" 'BEGIN{ if(n !~ /^[0-9]+$/ || n<0) exit 1 }' \
+  || die "--min-snps-for-phasing must be a non-negative integer"
+if [ -n "$SEED" ]; then
+  awk -v n="$SEED" 'BEGIN{ if(n !~ /^[0-9]+$/) exit 1 }' \
+    || die "--seed must be a non-negative integer"
+  RANDOM="$SEED"
+fi
+if [ -n "$SCE_BED" ]; then
+  [ -f "$SCE_BED" ] || die "SCE BED not found"
+fi
+
+###############################################################################
+# Prepare run directory
+###############################################################################
+mkdir -p "$OUT"/{config,inputs,truth,hack,hack_snps,hack_h1_sv,hack_h2_sv,visor_raw,bam}
+
+cp "$REGIONS" "$OUT/inputs/regions.bed"
+REGIONS="$OUT/inputs/regions.bed"
+
+###############################################################################
+# Validate regions BED (>=5 columns)
+###############################################################################
+awk 'BEGIN{ok=0} NF{ok=1; if(NF<5) exit 1} END{if(!ok) exit 1}' "$REGIONS" \
+  || die "Regions BED must be non-empty and have ≥5 columns"
+ACTIVE_CHROMS="$OUT/truth/active_chroms.txt"
+awk 'NF{print $1}' "$REGIONS" | sort -u > "$ACTIVE_CHROMS"
+
+###############################################################################
+# Validate SV ⊂ region
+###############################################################################
+validate_sv_in_region () {
+  local sv="$1"
+  awk 'NR==FNR{r[$1,$2,$3]=1; next}
+       {
+         ok=0
+         for (k in r) {
+           split(k,a,SUBSEP)
+           if ($1==a[1] && $2>=a[2] && $3<=a[3]) ok=1
+         }
+         if (!ok) {
+           print "[ERROR] SV not fully contained in region:", $0 > "/dev/stderr"
+           exit 1
+         }
+       }' "$REGIONS" "$sv"
+}
+
+bed_has_records () {
+  awk 'NF && $0 !~ /^#/ { found=1 } END{ exit found ? 0 : 1 }' "$1"
+}
+
+contains_interhap_sv () {
+  awk 'tolower($0) ~ /translocation/ { found=1 } END{ exit found ? 0 : 1 }' "$1"
+}
+
+copy_hap_fasta () {
+  local src_fa="$1"
+  local dest_fa="$2"
+
+  [ -f "$src_fa" ] || die "Expected haplotype FASTA not found: $src_fa"
+  cp "$src_fa" "$dest_fa"
+  if [ -f "$src_fa.fai" ]; then
+    cp "$src_fa.fai" "$dest_fa.fai"
+  elif [ "$VALIDATE_ONLY" -eq 0 ]; then
+    samtools faidx "$dest_fa"
+  fi
+}
+
+###############################################################################
+# Resolve and prepare SNP truth
+###############################################################################
+if [ -z "$SNP_H1" ]; then
+  SNP_H1="${SNP_H1:-${ASSETS_DIR:-$ROOT}/snp_sites/${SNP_SAMPLE}.snps.h1.bed}"
+fi
+if [ -z "$SNP_H2" ]; then
+  SNP_H2="${SNP_H2:-${ASSETS_DIR:-$ROOT}/snp_sites/${SNP_SAMPLE}.snps.h2.bed}"
+fi
+
+[ -f "$SNP_H1" ] || die "SNP h1 BED not found"
+[ -f "$SNP_H2" ] || die "SNP h2 BED not found"
+
+cp "$SNP_H1" "$OUT/inputs/snps.raw.h1.bed"
+cp "$SNP_H2" "$OUT/inputs/snps.raw.h2.bed"
+
+SNP_H1_HACK="$OUT/truth/snvs.h1.bed"
+SNP_H2_HACK="$OUT/truth/snvs.h2.bed"
+SNV_VCF="$OUT/truth/heterozygous_snvs.vcf"
+SNV_VCF_DIR="$OUT/truth/mosaicatcher_external_snv_calls"
+SNV_POSITIONS="$OUT/truth/strandphaser_positions.tsv"
+SNV_SUMMARY="$OUT/truth/snv_summary.tsv"
+
+python3 "$ROOT/lib/prepare_snv_truth.py" \
+  --ref "$REF_FASTA" \
+  --regions "$REGIONS" \
+  --h1 "$OUT/inputs/snps.raw.h1.bed" \
+  --h2 "$OUT/inputs/snps.raw.h2.bed" \
+  --out-h1 "$SNP_H1_HACK" \
+  --out-h2 "$SNP_H2_HACK" \
+  --out-vcf "$SNV_VCF" \
+  --per-chrom-dir "$SNV_VCF_DIR" \
+  --positions "$SNV_POSITIONS" \
+  --summary "$SNV_SUMMARY" \
+  --min-snps-per-chrom "$MIN_SNPS_FOR_PHASING"
+
+###############################################################################
+# Determine haplotypes (auto-HACk if needed)
+###############################################################################
+if [ -n "$HACK_DIR" ]; then
+  [ -d "$HACK_DIR" ] || die "HACk dir not found"
+  [ -f "$HACK_DIR/h1.fa" ] || die "Expected $HACK_DIR/h1.fa"
+  [ -f "$HACK_DIR/h2.fa" ] || die "Expected $HACK_DIR/h2.fa"
+  echo "[WARN] --hack was provided; assuming these haplotypes already contain the prepared SNVs"
+elif [ -n "$SV_H1" ] && [ -n "$SV_H2" ]; then
+  [ -f "$SV_H1" ] || die "SV h1 BED not found"
+  [ -f "$SV_H2" ] || die "SV h2 BED not found"
+
+  cp "$SV_H1" "$OUT/inputs/sv.h1.bed"
+  cp "$SV_H2" "$OUT/inputs/sv.h2.bed"
+
+  validate_sv_in_region "$OUT/inputs/sv.h1.bed"
+  validate_sv_in_region "$OUT/inputs/sv.h2.bed"
+
+  if contains_interhap_sv "$OUT/inputs/sv.h1.bed" || contains_interhap_sv "$OUT/inputs/sv.h2.bed"; then
+    die "SNP-first auto-HACk does not support translocation SV BEDs yet; provide prebuilt --hack haplotypes"
+  fi
+
+  if [ "$VALIDATE_ONLY" -eq 1 ]; then
+    echo "[INFO] --validate-only: skipping VISOR HACk"
+  else
+    echo "[INFO] Running HACk (SNPs first)"
+    VISOR HACk \
+      -g "$REF_FASTA" \
+      -b "$SNP_H1_HACK" "$SNP_H2_HACK" \
+      -o "$OUT/hack_snps"
+
+    if bed_has_records "$OUT/inputs/sv.h1.bed"; then
+      echo "[INFO] Running HACk (SVs on h1 SNP haplotype)"
+      VISOR HACk \
+        -g "$OUT/hack_snps/h1.fa" \
+        -b "$OUT/inputs/sv.h1.bed" \
+        -o "$OUT/hack_h1_sv"
+      copy_hap_fasta "$OUT/hack_h1_sv/h1.fa" "$OUT/hack/h1.fa"
+    else
+      copy_hap_fasta "$OUT/hack_snps/h1.fa" "$OUT/hack/h1.fa"
+    fi
+
+    if bed_has_records "$OUT/inputs/sv.h2.bed"; then
+      echo "[INFO] Running HACk (SVs on h2 SNP haplotype)"
+      VISOR HACk \
+        -g "$OUT/hack_snps/h2.fa" \
+        -b "$OUT/inputs/sv.h2.bed" \
+        -o "$OUT/hack_h2_sv"
+      copy_hap_fasta "$OUT/hack_h2_sv/h1.fa" "$OUT/hack/h2.fa"
+    else
+      copy_hap_fasta "$OUT/hack_snps/h2.fa" "$OUT/hack/h2.fa"
+    fi
+  fi
+  HACK_DIR="$OUT/hack"
+else
+  die "Provide either --hack or both --sv-h1/--sv-h2"
+fi
+
+###############################################################################
+# Downsample informative SNP sites
+###############################################################################
+HP1_SITES="$OUT/truth/hp_sites.HP1.bed"
+HP2_SITES="$OUT/truth/hp_sites.HP2.bed"
+
+downsample_sites_in_regions () {
+  local in_bed="$1"
+  local out_bed="$2"
+  local seed_offset="$3"
+  awk -v p="$HP_DENSITY" -v seed="$SEED" -v seed_offset="$seed_offset" '
+    BEGIN{
+      if (seed == "") srand()
+      else srand(seed + seed_offset)
+    }
+    NR==FNR {
+      if ($0 ~ /^#/ || NF < 3) next
+      n[$1]++
+      start[$1,n[$1]]=$2
+      end[$1,n[$1]]=$3
+      next
+    }
+    $0 !~ /^#/ && NF >= 3 {
+      chrom=$1
+      if (!(chrom in n)) next
+      for (i=1; i<=n[chrom]; i++) {
+        if ($2 < end[chrom,i] && $3 > start[chrom,i]) {
+          if (rand() < p) print
+          next
+        }
+      }
+    }
+  ' "$REGIONS" "$in_bed" > "$out_bed"
+}
+
+downsample_sites_in_regions "$SNP_H1_HACK" "$HP1_SITES" 11
+downsample_sites_in_regions "$SNP_H2_HACK" "$HP2_SITES" 29
+
+###############################################################################
+# Run VISOR SHORtS
+###############################################################################
+# --refcells is a COUNT in strand-creator; VISOR expects a PERCENTAGE.
+if ! [[ "$REFCELLS" =~ ^[0-9]+$ ]]; then
+  die "--refcells must be an integer count (0..cells)"
+fi
+if [ "$REFCELLS" -gt "$CELLS" ]; then
+  die "--refcells ($REFCELLS) cannot be > --cells ($CELLS)"
+fi
+
+REFCELLS_PCT=$(awk -v r="$REFCELLS" -v c="$CELLS" 'BEGIN{
+  if (c==0) { print 0; exit }
+  printf "%.1f", (r/c)*100.0
+}')
+echo "[INFO] refcells: $REFCELLS of $CELLS => VISOR --refcells $REFCELLS_PCT%"
+
+VISOR_CMD=(
+  VISOR SHORtS
+  -g "$REF_FASTA" \
+  -s "$HACK_DIR" \
+  -b "$REGIONS" \
+  -o "$OUT/visor_raw" \
+  --strandseq \
+  --coverage "$COVERAGE" \
+  --noise "$NOISE" \
+  --threads "$THREADS" \
+  --cells "$CELLS" \
+  --refcells "$REFCELLS_PCT"
+)
+if [ -n "$SCE_BED" ]; then
+  cp "$SCE_BED" "$OUT/inputs/sce.bed"
+  VISOR_CMD+=(--sce "$OUT/inputs/sce.bed")
+fi
+
+cat > "$OUT/config/run.env" <<EOF
+REF_FASTA=$REF_FASTA
+ASSETS_DIR=${ASSETS_DIR:-}
+REGIONS=$REGIONS
+HACK_DIR=$HACK_DIR
+CELLS=$CELLS
+REFCELLS=$REFCELLS
+REFCELLS_PCT=$REFCELLS_PCT
+COVERAGE=$COVERAGE
+NOISE=$NOISE
+THREADS=$THREADS
+HP_DENSITY=$HP_DENSITY
+SNP_SAMPLE=$SNP_SAMPLE
+SNP_H1=$SNP_H1
+SNP_H2=$SNP_H2
+SNP_H1_HACK=$SNP_H1_HACK
+SNP_H2_HACK=$SNP_H2_HACK
+SNV_VCF=$SNV_VCF
+SNV_VCF_DIR=$SNV_VCF_DIR
+SNV_POSITIONS=$SNV_POSITIONS
+SNV_SUMMARY=$SNV_SUMMARY
+MIN_SNPS_FOR_PHASING=$MIN_SNPS_FOR_PHASING
+SCE_BED=${SCE_BED:-}
+SEED=${SEED:-}
+EOF
+
+if [ "$VALIDATE_ONLY" -eq 1 ]; then
+  echo "[INFO] --validate-only: skipping VISOR SHORtS"
+  echo "[DONE] Validation passed; metadata written to $OUT/config/run.env"
+  exit 0
+fi
+
+echo "[INFO] Running VISOR SHORtS"
+"${VISOR_CMD[@]}"
+
+###############################################################################
+# Inheritance + sparse HP tagging
+###############################################################################
+echo -e "cell\tchrom\tstate" > "$OUT/truth/inheritance_states.tsv"
+states=(WW WC CW CC)
+pick_state () {
+  printf "%s\n" "${states[$((RANDOM % ${#states[@]}))]}"
+}
+
+for cell in "$OUT/visor_raw"/sample_cell* "$OUT/visor_raw"/reference_cell*; do
+  
+  [ -d "$cell" ] || continue
+  
+  cname=$(basename "$cell")
+  tmpdir=$(mktemp -d)
+
+  while read -r chr; do
+    state=$(pick_state)
+    echo -e "$cname\t$chr\t$state" >> "$OUT/truth/inheritance_states.tsv"
+
+    case "$state" in
+      WW) b1="$cell/h1/W.srt.bam"; b2="$cell/h2/W.srt.bam";;
+      CC) b1="$cell/h1/C.srt.bam"; b2="$cell/h2/C.srt.bam";;
+      WC) b1="$cell/h1/W.srt.bam"; b2="$cell/h2/C.srt.bam";;
+      CW) b1="$cell/h1/C.srt.bam"; b2="$cell/h2/W.srt.bam";;
+    esac
+
+    samtools view -h "$b1" "$chr" \
+      | "$ROOT/lib/tag_hp_sparse.py" --sites "$HP1_SITES" --hp 1 \
+      | samtools view -b -o "$tmpdir/${chr}.h1.bam" -
+
+    samtools view -h "$b2" "$chr" \
+      | "$ROOT/lib/tag_hp_sparse.py" --sites "$HP2_SITES" --hp 2 \
+      | samtools view -b -o "$tmpdir/${chr}.h2.bam" -
+  done < "$ACTIVE_CHROMS"
+
+  samtools merge -f "$tmpdir/merged.bam" "$tmpdir"/*.bam
+  samtools sort -o "$OUT/bam/${cname}.bam.htg" "$tmpdir/merged.bam"
+  samtools index "$OUT/bam/${cname}.bam.htg"
+
+  rm -rf "$tmpdir"
+done
+
+echo "[DONE] Output written to $OUT"
