@@ -205,6 +205,8 @@ snakemake --profile workflow/profiles --configfile config/config.yaml -n
 snakemake --profile workflow/profiles --configfile config/config.yaml
 ```
 
+The cluster profile uses Snakemake-managed conda environments. The first real run creates the VISOR runtime from `workflow/envs/visor.yaml`, then subsequent runs reuse that environment. The environment file uses only `conda-forge`, `bioconda`, and `nodefaults`; no `defaults`/Anaconda channel is requested.
+
 The Snakemake layer intentionally calls `bin/strand-creator` rather than duplicating simulator logic. This keeps the first smoke target simple now and gives us a clean place to add future per-cell profile-table runs from `bamqc-pipeline` outputs.
 
 ---
@@ -366,7 +368,7 @@ You should see:
 ---
 
 ### 6.2 Snakemake smoke run
-The recommended cluster test path is Snakemake. Set `run.validate_only: true` in `config/config.yaml` for a fast validation run, or `false` to make BAMs. Then run:
+The recommended cluster test path is Snakemake. Set `run.validate_only: true` in `config/config.yaml` for a fast validation run, or `false` to make BAMs. The first run also builds the conda runtime from `workflow/envs/visor.yaml`. Then run:
 
 ```bash
 snakemake --profile workflow/profiles --configfile config/config.yaml -n
@@ -377,9 +379,10 @@ The first target creates:
 
 - `config/run.env`
 - `truth/snv_summary.tsv`
+- `config/bam_manifest.tsv`
 - `config/strand_creator.done`
 
-When `run.validate_only: false`, the same job also writes final BAMs under `bam/`.
+When `run.validate_only: false`, the same job also writes final BAMs under `bam/` and records them in `config/bam_manifest.tsv`.
 
 ---
 

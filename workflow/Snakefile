@@ -118,6 +118,8 @@ rule strand_creator_run:
         done=touch(RUN_DONE)
     log:
         LOG_FILE
+    conda:
+        "envs/visor.yaml"
     threads:
         int(cfg("simulation", "threads", 16))
     resources:

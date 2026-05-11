@@ -25,4 +25,4 @@ local-cores: 1
 latency-wait: 60
 jobs: 200
 
-use-conda: false
+use-conda: true
